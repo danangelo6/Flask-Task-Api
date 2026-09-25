@@ -23,7 +23,7 @@ jobs:
       - name: Lint
         run: flake8 app --max-line-length 100
       - name: Unit tests
-        run: pytest -v
+        run: cd app && pytest -v
 
   docker:
     runs-on: ubuntu-latest

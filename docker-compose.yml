@@ -1,0 +1,13 @@
+services:
+  api:
+    build:
+      context: .
+      args:
+        APP_VERSION: compose
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: compose
+      APP_MESSAGE: "Hello from Docker Compose"
+    restart: unless-stopped
+  # Exercise: add a postgres (or redis) service here and make the API use it.

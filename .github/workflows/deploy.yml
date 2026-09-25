@@ -1,0 +1,54 @@
+name: Deploy to EKS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write # required for OIDC
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Opt-in: only runs once you set repo variable ENABLE_AWS_DEPLOY=true
+    if: ${{ vars.ENABLE_AWS_DEPLOY == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: APP_VERSION=${{ github.sha }}
+          tags: ${{ vars.ECR_REPOSITORY_URL }}:${{ github.sha }}
+
+      - name: Configure kubectl
+        run: aws eks update-kubeconfig --region ${{ vars.AWS_REGION }} --name ${{ vars.EKS_CLUSTER_NAME }}
+
+      - name: Deploy with kustomize
+        working-directory: k8s/overlays/eks
+        run: |
+          kustomize edit set image task-api=${{ vars.ECR_REPOSITORY_URL }}:${{ github.sha }}
+          kubectl apply -k .
+          kubectl -n task-api rollout status deployment/task-api --timeout=180s
+
+      - name: Show endpoint
+        run: kubectl -n task-api get svc task-api -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'

@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: app/requirements-dev.txt
+      - run: pip install -r app/requirements-dev.txt
+      - name: Lint
+        run: flake8 app --max-line-length 100
+      - name: Unit tests
+        run: cd app && pytest -v
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        run: docker build --build-arg APP_VERSION=${{ github.sha }} -t task-api:ci .
+      - name: Run container and hit /health
+        run: |
+          docker run -d --name api -p 8000:8000 task-api:ci
+          for i in $(seq 1 15); do
+            curl -fs localhost:8000/health && exit 0
+            sleep 1
+          done
+          docker logs api
+          exit 1
+
+  terraform:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dir: [terraform/aws, terraform/local-kind]
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false
+      - run: terraform validate
+
+  k8s-smoke-test:
+    # Real deploy into a throwaway kind cluster inside the runner (free)
+    needs: [test, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate that both overlays render
+        run: |
+          kubectl kustomize k8s/overlays/local > /dev/null
+          kubectl kustomize k8s/overlays/eks > /dev/null
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: ci
+      - name: Build image and load it into kind
+        run: |
+          docker build -t task-api:local .
+          kind load docker-image task-api:local --name ci
+      - name: Deploy
+        run: |
+          kubectl apply -k k8s/overlays/local
+          kubectl -n task-api rollout status deployment/task-api --timeout=120s
+      - name: Smoke test
+        run: |
+          kubectl -n task-api port-forward svc/task-api 8080:80 &
+          sleep 3
+          curl -fs localhost:8080/health
+          curl -fs -X POST localhost:8080/tasks -H 'Content-Type: application/json' -d '{"title":"ci"}'
+      - name: Debug on failure
+        if: failure()
+        run: |
+          kubectl -n task-api get all
+          kubectl -n task-api describe pods
+          kubectl -n task-api logs -l app=task-api --tail=100
